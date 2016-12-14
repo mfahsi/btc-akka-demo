@@ -1,0 +1,22 @@
+ def And[T](functions: (T => Boolean)*): T => Boolean = (a: T) => functions.map(_ (a)).reduce(_ && _)
+
+  def Or[T](functions: (T => Boolean)*) = (a: T) => functions.exists(_ (a))
+
+  def Not[T](f: T => Boolean) =(x:T)=> !f(x)
+  
+   def loadEmptyFilesAsNodes(directory: String): List[DataNode] = {
+    val names = IOUtils.listEmptyFilesInFolder(directory)
+    names.map(filename => DataNode(filename.split('.')(0))).map(n => n.+("Id", n.id))
+  }
+
+  def buildGraphFromCSVSource(directory: String)(implicit mater:akka.stream.Materializer) = {
+    val graph = loadEmptyFilesAsNodes(directory).foldLeft(Graph[DataNode, HyperEdge]())((g, n) => g + n)
+    val sourceFlowOfDependencies = streamOfSessionsDependenciesAsDependency(directory)
+    //add all edges
+    sourceFlowOfDependencies.runFold(graph)((g, edge) => GraphOperations.addEdge[DataNode](g, edge))
+  }
+  
+   val futurSimplifiedGraph = for {
+      graph <- DollarUniverseGraph.buildGraphFromCSVSource(graphFullDefinitionDirectory) //load the graph
+      attrs <- DollarUniverseGraph.loadAllAttributesFromAttributeFolder(attributeResourceDirectory) //load attributes
+    } yield addAttributesToGraph(graph, attrs)
