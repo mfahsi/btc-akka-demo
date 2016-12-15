@@ -1,0 +1,267 @@
+ case class DisplayRule(fct:DataNode=>Boolean,dotAttr:List[DotAttr])
+
+object DisplayRule {
+  def dispRules(rules:DisplayRule*)=rules.toList
+
+  val specialDisplayRules : List[DisplayRule] = dispRules(
+    when(lateOnScheduleBy1Hrs).fillColor("salmon"),
+    //  when(And(verify[Double]("duration",_>30), Not(lateOnScheduleBy1Hrs),scheduledMorning)).fillColor("lemonchiffon"),
+    when(owner("CB")).color("blue"),
+    when("Label").meets(_.contains("Pack")).color("pink")
+  )
+
+  val defaultDisplayRules : List[DisplayRule]= dispRules (
+    when(lateOnScheduleBy1Hrs).fillColor("lavenderblush"),
+    when(Not(isDefined("effectiveStartTime"))).fillColor("whitesmoke")
+  )
+ def nodeAttributesDecoratorFunctionalView(node: DataNode) = mapNodeToDot(node)("{ {<f0>{Label} }|{<f1> {scheduledTime}  }}", Set("description", "scheduledTime"))
+
+  def nodeAttributesDecoratorGlobalView(node: DataNode) = mapNodeToDot(node)("{{<f1>{Label}|<f2>{owner}}|{<f3>{scheduledTime}|<f4>{effectiveStartTime}|<f5>{duration}}|{<f0> {Id}@{server}}}", Set("Id", "Label", "owner", "scheduledTime", "effectiveStartTime", "duration", "server"))
+
+  def mapNodeToDot(node: DataNode)(template: String, attrNames: Set[String]): List[DotAttr] = {
+    val templatesAsList: Set[(String, String)] = for (attributeName <- attrNames ) yield (attributeName, node.getAttributeAsString(attributeName).getOrElse(""))
+    val mapofSymbols = templatesAsList.foldLeft(Map[String, String]())({ (x, y) => x.+(y) })
+    //replace elemsts like {key} buy value given in the map
+    def replaceTemplates(text: String, templates: Map[String, String]): String = {
+      val builder = new StringBuilder(text)
+      @tailrec
+      def loop(key: String, keyLength: Int, value: String): StringBuilder = {
+        val index = builder.lastIndexOf(key)
+        if (index < 0) builder
+        else {
+          builder.replace(index, index + keyLength, value)
+          loop(key, keyLength, value)
+        }
+      }
+      templates.foreach {
+        case (key, value) =>
+          val template = "{" + key + "}"
+          loop(template, template.length, value)
+      }
+      builder.toString
+    }
+    List(DotAttr(Id("label"), Id(replaceTemplates(template, mapofSymbols))))
+  }
+
+  type HyperEdgeTransformer[N, E[X] <: scalax.collection.GraphPredef.EdgeLikeIn[X]] = scala.Function1[scalax.collection.Graph[N, E]#EdgeT, scala.Traversable[scala.Tuple2[scalax.collection.io.dot.DotGraph, scalax.collection.io.dot.DotEdgeStmt]]]
+
+  val root = DotRootGraph(directed = true,
+    id = Some("Dep Graph"),
+    attrStmts = List(DotAttrStmt(Elem.node, List(DotAttr("shape", "Mrecord"))))
+  )
+
+  def convertToDotLanguage(graph: Graph[DataNode, HyperEdge]) =graph2DotExport(graph)
+
+  def exportToDot(graph: Graph[DataNode, HyperEdge], root:DotRootGraph=root, displayRules:List[DisplayRule]=defaultDisplayRules ) = {
+    import implicits._
+    def edgeTransformer(innerEdge: Graph[DataNode, HyperEdge]#EdgeT):
+    Option[(DotGraph, DotEdgeStmt)] = {
+      innerEdge.edge match {
+        case LDiEdge(source, target, _) => {
+          val edge = innerEdge.edge
+          val label = innerEdge.edge.label
+          label match {
+            case s: String => Some(root, DotEdgeStmt(source.value.id, target.value.id, if (!s.isEmpty) List(DotAttr(Id("label"), Id(s)), DotAttr(Id("style"), Id("dashed")), DotAttr(Id("fontsize"), Id("7"))) else Nil)) // Nil
+            case e: Any => Some(root, DotEdgeStmt(source.value.id, target.value.id, Nil))
+        }
+        }
+        case HyperEdge(source, target) => Some((root, DotEdgeStmt(source.value.id, target.value.id, Nil)))
+      }
+    }
+
+
+    def cNodeTransformer(innerNode: Graph[DataNode, HyperEdge]#NodeT)(implicit rules:List[DisplayRule]=displayRules): Option[(DotGraph, DotNodeStmt)] = {
+      def parseDouble(s: String, default: Number = 0) = try { NumberFormat.getNumberInstance(Locale.FRANCE).parse(s) } catch {  case _ => default  }
+      val node = innerNode.value
+      var list = nodeAttributesDecoratorGlobalView(node)
+
+      rules.foreach(rule=>{
+        if(rule.fct(node)){
+          list = list ++ rule.dotAttr
+        }
+      })
+      Some((root, DotNodeStmt(innerNode.value.id, {
+        list
+      })))
+    }
+    val dotGraph = convertToDotLanguage(graph)
+    println("dot graph "+dotGraph)
+    val res = dotGraph.toDot(root, edgeTransformer, cNodeTransformer = Some(cNodeTransformer),iNodeTransformer = Some(cNodeTransformer))
+   // println("++Result++\n "+res)
+    res
+  }
+
+
+case class DataNodeCriteria(fct: DataNode => Boolean) {
+  def color(colorName: String) = DisplayRule(fct, List(DotAttr(Id("color"), Id(colorName))))
+  def fillColor(colorName: String) = DisplayRule(fct, List(DotAttr(Id("style"), Id("filled")), DotAttr(Id("fillcolor"), Id(colorName))))
+  def fontColor(colorName: String) = DisplayRule(fct, List(DotAttr(Id("fontcolor"), Id(colorName))))
+  def fontName(colorName: String) = DisplayRule(fct, List(DotAttr(Id("fontName"), Id(colorName))))
+}
+
+
+//implicit class DotCriteria
+
+object CriteriaDsl {
+  import com.graph.GraphWithAttributes._
+  import DataNodeCriteria._
+  import DataNode._
+  implicit def buildNodeCriteriaFromAttributeCriteria(implicit att: MyAttr, filter: String => Boolean): (DataNode => Boolean) = nCriteria[String](att.attName,  filter)(stringParser)
+
+  case class MyAttr(attName: String) {
+     def meets(fct: String => Boolean) = DataNodeCriteria(buildNodeCriteriaFromAttributeCriteria(this, fct))
+  }
+
+  def when(attrName: String) = MyAttr(attrName)
+
+  def when(criteria: DataNode => Boolean) = DataNodeCriteria(criteria)
+
+}
+
+/**
+  * Created by fahsim on 02/12/2016.
+  */
+object DataNodeCriteria {
+  import com.graph.GraphWithAttributes._
+  import DataNode._
+  import LogicalOperators._
+  //defining filters
+  //note : if value is not available all criteria is set to false
+  val All: (DataNode => Boolean) = n => true
+  val None: (DataNode => Boolean) = Not(All)
+
+  val scheduledEvening = nCriteria[Date]("scheduledTime", _.getHours >= 12)
+  //parser implicit
+  val scheduledMorning = nCriteria[Date]("scheduledTime", _.getHours <= 12)
+  val lateOnScheduleBy1Hrs = lateOnScheduleByMins(60)(_)
+  val lateOnScheduleBy30Minutes = lateOnScheduleByMins(30)(_)
+  val durationLessThan2 = durationBetween(0, 2)
+  val durationGreaterThan5 = durationBetween(5, 1000)
+
+  def isDefined(attName: String) = nCriteria[String](attName, x => !("".equals(x) || x == null))
+  def owner(value:String*) = nCriteria[String]("owner", v => value.exists(_ == v))
+  def durationBetween(min: Double, max: Double = 10000) = nCriteria[Double]("duration", dbl => min <= dbl && dbl <= max)
+
+  def verify[T](attribute: String, filter: T => Boolean)(implicit parser:String=>Option[T]) = nCriteria[T](attribute,filter)
+
+  def lateOnScheduleByMins(mins: Int) = (x: DataNode) => {
+    val scheduled = getDateAttribute(x, "scheduledTime")
+    val oneHourplusSchedule = scheduled.map(d => addMinutes(d, mins))
+    val effective = getDateAttribute(x, "effectiveStartTime")
+    (effective.isDefined && oneHourplusSchedule.isDefined && effective.get.after(oneHourplusSchedule.get))
+  }
+
+  /** * Utility Functions ***/
+  def addMinutes(date: Date, mins: Integer) = {
+    var cal = Calendar.getInstance(); // creates calendar
+    cal.setTime(date); // sets calendar time/date
+    cal.add(Calendar.MINUTE, mins); // adds one hour
+    cal.getTime();
+  }
+
+
+
+
+  val frenchNumberFormat = NumberFormat.getNumberInstance(Locale.FRANCE)
+  implicit val doubleParser: String => Option[Double] = (str: String) => try {
+    Some(frenchNumberFormat.parse(str).doubleValue())
+  } catch {
+    case _ => Option.empty
+  }
+ 
+ def runGraphGenerationWithSettings(graphName: String, homeFolder: String, gASettings: GASettings = GASettings()) = {
+    //Execution context elements Akka actor system
+    implicit val system = ActorSystem("Sys"+graphName)
+    implicit val ec = system.dispatcher
+    implicit val materializer = ActorMaterializer()
+    import scala.concurrent.duration._
+
+    //end of context
+    val rootOfGraph = DotRootGraph(directed = true, id = Some("Dep Graph"), attrStmts = List(DotAttrStmt(Elem.node, List(DotAttr("shape", "Mrecord")))))
+    val attributeResourceDirectory = homeFolder + "/attributes"
+    //any file will have a header with attribute names and ; separator
+    val graphFullDefinitionDirectory = homeFolder + "/dependencies"
+    val futurSimplifiedGraph = for {
+      graph <- DollarUniverseGraph.buildGraphFromCSVSource(graphFullDefinitionDirectory) //load the graph
+      attrs <- DollarUniverseGraph.loadAllAttributesFromAttributeFolder(attributeResourceDirectory) //load attributes
+    } yield addAttributesToGraph(graph, attrs)
+
+    val fut =futurSimplifiedGraph andThen {
+      case Success(gr) => {
+        println("GraphWithAttributes=> " + gr.nodes.size + " nodes and " + gr.edges.size + " edges")
+        val graph = GraphOperations.reduceNodesRec[DataNode](gr, gASettings.removeFilter, gASettings.keepFilter)
+        println("Reduced To=> " + graph.nodes.size + " nodes and " + graph.edges.size + " edges")
+        val res = GraphToDotExport.exportToDot(graph, rootOfGraph, gASettings.displayRules)
+        println("Exported to dot ")
+        IOUtils.writeToFile(homeFolder + "/out/" + graphName + ".txt", res)
+        println("terminated")
+        val ter = system.terminate()
+        true
+      }
+      case Failure(e) => {println("failed "+e.printStackTrace);false}
+    }
+    fut
+  }
+
+object GraphWithAttributes {
+  type GraphT = Graph[NodeType, HyperEdge]
+  type NodeType = DataNode
+
+  case class DataNode(id: String, attributes: Map[String, String] = Map()) {
+    def getAttribute(attrName: String): Option[String] = attributes.get(attrName)
+
+    def getAttributeAs[T](attrName: String)(implicit parser: String => Option[T]): Option[T] = {
+      //println(attrName + " parser" + parser);
+      getAttribute(attrName).flatMap[T]((x: String) => parser(x))
+    }
+
+    def getAttributeAsString(attrName: String): Option[String] = getAttributeAs[String](attrName)((x: String) => Some(x))
+
+    def +(attribute: String, value: String): DataNode = DataNode(id, attributes + (attribute -> value))
+  }
+
+  case class Dependency[T](from: T, to: T)
+
+  implicit val stringParser = (x:String)=>Some(x)
+  implicit val dateParser: String => Option[Date] = (str: String) => try {
+    val hhmmFormat = new SimpleDateFormat("hh:mm")
+    Some(hhmmFormat.parse(str))
+  } catch {
+    case _ => Option.empty
+  }
+ // def applyFilter(attribute: String)(filter: String => Boolean)(node: DataNode) : Boolean = applyFilter[String](attribute)(filter)(node)
+  def applyFilter[T](attribute: String)(filter: T => Boolean)(node: DataNode)(implicit parser:String=>Option[T]) : Boolean = node.getAttributeAs[T](attribute)(parser) match {
+     case Some(x)=> {/*println(attribute+"->"+x+" "+filter);*/ filter(x)}
+     case None => false
+  }
+
+  def nStrCriteria(attribute: String, filter: String => Boolean) = nCriteria[String](attribute,filter)//applyFilter[String](attribute)(filter)(_)
+  def nCriteria[T](attr:String,filter:T=>Boolean)(implicit parser:String=>Option[T])= applyFilter[T](attr)(filter)(_)
+  def getDateAttribute(node: DataNode, attrName: String): Option[Date] = node.getAttributeAs[Date](attrName)
+ // def nCriteria[T](attr:String,filter:T=>Boolean)(implicit parser:String=>Option[T])= applyFilter[T](attr)(filter)(_)
+  def id(value:String*) = nStrCriteria("Id", id => value.exists(_ == id))
+  def equals(attName: String,value:String) = nStrCriteria(attName, _ == value)
+  def equalsIgnoreCase(attName: String,value:String) = nStrCriteria(attName, _.equalsIgnoreCase(value))
+  def contains(attName: String,value:String) = nStrCriteria(attName, _.contains(value))
+  def containsIgnoreCase(attName: String,value:String) = nStrCriteria(attName, _.toLowerCase.contains(value.toLowerCase))
+
+
+  def addAttributesToGraph(graph: GraphT, attributesDB: Map[String, Map[String, String]]): GraphT = {
+    //def mapNode2(session: DataNode) = DataNode(session.id, session.attributes ++ (attributes.mapValues[String](map => map.getOrElse(session.id, ""))) + ("Id" -> session.id))
+    def mapNode(session: DataNode) = {
+      val nodeAttributes = attributesDB.mapValues[String](map => {map.getOrElse(session.id, "")})
+      DataNode(session.id, session.attributes ++ nodeAttributes + ("Id" -> session.id))
+    }
+
+    println("Original Graph => "+graph.nodes.size+" nodes and "+graph.edges.size+" edges")
+    val g : GraphT = graph.nodes.foldLeft(graph.empty)((g1,n1)=>g1+n1)
+     val edges = graph.edges.map(x => (x.edge._1.value, x.edge._2.value, GraphOperations.edgeLabel[DataNode](x))).map(tupple => LDiEdge(mapNode(tupple._1), mapNode(tupple._2))(tupple._3))
+    val res = edges.foldLeft(graph.empty)((g1, e) => g1 + e)
+    val s = g.nodes.filterNot(n=>res.nodes.exists(p => p.id == n.id))   //filterNot(n=> res.inn.contains(n))
+    val enhanced = s.foldLeft(res)((g1,n1)=>g1+n1)
+    // println("enhanced graph size "+enhanced.size+" nodessize "+enhanced.nodes.size)
+   // enhanced
+    enhanced
+  }
+
+}
